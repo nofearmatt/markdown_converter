@@ -13,6 +13,7 @@ import sys
 import argparse
 import queue
 import threading
+import logging
 
 # Добавляем корень проекта в путь
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -26,8 +27,10 @@ from app.app_logic import convert_files
 class _DummyQueue:
     def __init__(self):
         self._q = queue.Queue()
+        self.seen_warning = False
+        self.seen_error = False
+        self.seen_success = False
     def put(self, msg):
-        # Печатаем краткие сообщения в stdout
         t = msg.get('type')
         if t == 'progress':
             val = msg.get('value')
@@ -35,6 +38,12 @@ class _DummyQueue:
             sys.stdout.flush()
         else:
             print(f"[{t}] {msg.get('message','')}")
+        if t == 'warning':
+            self.seen_warning = True
+        elif t == 'error':
+            self.seen_error = True
+        elif t == 'success':
+            self.seen_success = True
 
 
 def main() -> int:
@@ -66,8 +75,17 @@ def main() -> int:
     parser.add_argument('--zip-name', dest='zip_name', default='', help='Zip file name without extension')
     parser.add_argument('--pdf', dest='export_pdf', action='store_true', help='Export PDF alongside Markdown/HTML')
     parser.add_argument('--docx', dest='export_docx', action='store_true', help='Export DOCX alongside Markdown/HTML')
+    parser.add_argument('--log-file', dest='log_file', default='', help='Log to file')
+    parser.add_argument('--log-level', dest='log_level', default='INFO', choices=['DEBUG','INFO','WARNING','ERROR','CRITICAL'], help='Logging level')
 
     args = parser.parse_args()
+
+    # Логирование
+    level = getattr(logging, args.log_level.upper(), logging.INFO)
+    if args.log_file:
+        logging.basicConfig(filename=args.log_file, level=level, format='%(asctime)s %(levelname)s %(message)s')
+    else:
+        logging.basicConfig(level=level, format='%(asctime)s %(levelname)s %(message)s')
 
     src = os.path.abspath(args.src)
     dst = os.path.abspath(args.dst)
@@ -102,18 +120,25 @@ def main() -> int:
         'export_docx': bool(args.export_docx),
     })
 
-    # Обработка отмены (Ctrl+C)
     cancel_event = threading.Event()
     settings['cancel_event'] = cancel_event
 
     q = _DummyQueue()
+    exit_code = 0
     try:
         convert_files(src, dst, settings, q)
+        if q.seen_error:
+            exit_code = 2
+        elif q.seen_warning:
+            exit_code = 1
+        else:
+            exit_code = 0 if q.seen_success else 1
     except KeyboardInterrupt:
         cancel_event.set()
         print("\nОтмена по запросу пользователя...")
+        exit_code = 2
     print("\nГотово.")
-    return 0
+    return exit_code
 
 
 if __name__ == '__main__':
