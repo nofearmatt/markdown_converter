@@ -16,6 +16,11 @@ from pathlib import Path
 from app.app_logic import convert_files
 from app.settings import load_settings, save_settings
 from app.watcher import DirectoryWatcher
+try:
+    from tkinterweb import HtmlFrame
+except Exception:
+    HtmlFrame = None
+import json
 
 class MainWindow:
     """
@@ -122,8 +127,9 @@ class MainWindow:
         # Секция кнопок управления
         self.create_control_section(main_frame)
         
-        # Секция прогресса и логов
+        # Секция прогресса, логов и предпросмотра
         self.create_progress_section(main_frame)
+        self.create_html_preview_section(main_frame)
     
     def create_folder_selection_section(self, parent):
         """Создает секцию выбора папок."""
@@ -154,6 +160,12 @@ class MainWindow:
             height=30
         )
         self.source_entry.pack(side="left", fill="x", expand=True, padx=(8, 8), pady=6)
+        # DnD (best-effort)
+        try:
+            self.source_entry.drop_target_register('DND_Files')
+            self.source_entry.dnd_bind('<<Drop>>', lambda e: (self.source_entry.delete(0, tk.END), self.source_entry.insert(0, e.data.strip('{}'))))
+        except Exception:
+            pass
         
         source_button = ctk.CTkButton(
             source_path_frame,
@@ -180,6 +192,11 @@ class MainWindow:
             height=30
         )
         self.dest_entry.pack(side="left", fill="x", expand=True, padx=(8, 8), pady=6)
+        try:
+            self.dest_entry.drop_target_register('DND_Files')
+            self.dest_entry.dnd_bind('<<Drop>>', lambda e: (self.dest_entry.delete(0, tk.END), self.dest_entry.insert(0, e.data.strip('{}'))))
+        except Exception:
+            pass
         
         dest_button = ctk.CTkButton(
             dest_path_frame,
@@ -193,6 +210,16 @@ class MainWindow:
         # Загружаем сохраненные пути
         self.source_entry.insert(0, self.settings.get("source_dir", ""))
         self.dest_entry.insert(0, self.settings.get("dest_dir", ""))
+        
+        # Недавние проекты
+        recent = self.settings.get('recent_projects') or []
+        if recent:
+            recent_row = ctk.CTkFrame(folder_frame)
+            recent_row.pack(fill="x", padx=12, pady=6)
+            ctk.CTkLabel(recent_row, text="Недавние:").pack(side="left", padx=(0,6))
+            self.recent_var = tk.StringVar(value=recent[0])
+            recent_menu = ctk.CTkOptionMenu(recent_row, values=recent, variable=self.recent_var, command=self.apply_recent)
+            recent_menu.pack(side="left")
     
     def create_settings_section(self, parent):
         """Создает секцию настроек конвертации."""
@@ -530,22 +557,18 @@ class MainWindow:
         )
         clear_log_button.pack(anchor="e", padx=10, pady=(0, 10))
 
-        # Предпросмотр Markdown
-        preview_frame = ctk.CTkFrame(parent)
-        preview_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        preview_title = ctk.CTkLabel(preview_frame, text="🖼 Предпросмотр Markdown", font=ctk.CTkFont(size=14, weight="bold"))
-        preview_title.pack(pady=(12, 8))
-        path_row = ctk.CTkFrame(preview_frame)
-        path_row.pack(fill="x", padx=12, pady=(0, 8))
-        self.preview_path_entry = ctk.CTkEntry(path_row, placeholder_text="Выберите JSON файл для предпросмотра...", height=30)
-        self.preview_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 8), pady=6)
-        browse_preview_btn = ctk.CTkButton(path_row, text="Обзор", width=80, command=self.browse_preview_file)
-        browse_preview_btn.pack(side="left", padx=(0, 8), pady=6)
-        render_btn = ctk.CTkButton(path_row, text="Рендер", width=100, command=self.render_preview)
-        render_btn.pack(side="left", padx=(0, 8), pady=6)
-        self.preview_text = ctk.CTkTextbox(preview_frame, wrap="word", font=ctk.CTkFont(size=10))
-        self.preview_text.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-    
+    def create_html_preview_section(self, parent):
+        frame = ctk.CTkFrame(parent)
+        frame.pack(fill="both", expand=True, padx=12, pady=(0,12))
+        title = ctk.CTkLabel(frame, text="🌐 HTML Preview", font=ctk.CTkFont(size=14, weight="bold"))
+        title.pack(pady=(12,8))
+        if HtmlFrame is not None:
+            self.html_view = HtmlFrame(frame)
+            self.html_view.pack(fill="both", expand=True, padx=12, pady=(0,12))
+        else:
+            self.html_view = None
+            ctk.CTkLabel(frame, text="tkinterweb недоступен; HTML-превью отключено").pack(pady=6)
+
     def browse_source_folder(self):
         """Открывает диалог выбора исходной папки."""
         folder = filedialog.askdirectory(
@@ -586,11 +609,24 @@ class MainWindow:
                 "exclude_thoughts": self.exclude_thoughts_var.get(),
                 "template_path": self.template_entry.get().strip(),
                 "enable_yaml_front_matter": self.enable_yaml_front_matter_var.get(),
+                "source_format": self.source_format_var.get(),
             }
-            from app.app_logic import render_markdown_preview
+            from app.app_logic import render_markdown_preview, _render_html_from_markdown
             md_text = render_markdown_preview(json_path, settings)
             self.preview_text.delete(1.0, tk.END)
             self.preview_text.insert(tk.END, md_text)
+            if self.html_view is not None:
+                # Уберем YAML и рендерим
+                if md_text.startswith('---\n'):
+                    try:
+                        end_idx = md_text.index('\n---\n', 4)
+                        md_for_html = md_text[end_idx + 5 :]
+                    except ValueError:
+                        md_for_html = md_text
+                else:
+                    md_for_html = md_text
+                html = _render_html_from_markdown(md_for_html, settings, {"title":"Preview"})
+                self.html_view.load_html(html)
         except Exception as e:
             self.log_message(f"❌ Ошибка предпросмотра: {e}", "error")
             messagebox.showerror("Ошибка", f"Не удалось отрендерить предпросмотр: {e}")
@@ -640,6 +676,13 @@ class MainWindow:
             # Сохраняем настройки
             if save_settings(current_settings):
                 self.settings = current_settings
+                # Обновим «Недавние проекты»
+                rp = self.settings.get('recent_projects') or []
+                src = self.settings.get('source_dir') or ''
+                if src:
+                    rp = [src] + [p for p in rp if p != src]
+                    self.settings['recent_projects'] = rp[:10]
+                    save_settings(self.settings)
                 self.log_message("✅ Настройки успешно сохранены", "info")
                 messagebox.showinfo("Успех", "Настройки успешно сохранены!")
             else:
@@ -922,3 +965,11 @@ class MainWindow:
         self.watch_start_button.configure(state="normal")
         self.watch_stop_button.configure(state="disabled")
         self.status_label.configure(text="Наблюдение остановлено")
+
+    def apply_recent(self, value):
+        try:
+            if value:
+                self.source_entry.delete(0, tk.END)
+                self.source_entry.insert(0, value)
+        except Exception:
+            pass
