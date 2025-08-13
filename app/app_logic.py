@@ -21,6 +21,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from jinja2 import Environment, FileSystemLoader
 import markdown as md
 from app.adapters import normalize_conversation
+from docx import Document as DocxDocument
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
 
 
 def ensure_destination_directory(dest_dir: str) -> bool:
@@ -442,6 +445,41 @@ hr {{ border: none; border-top: 1px solid #e0e0e0; margin: 24px 0; }}
 """
 
 
+def _export_docx_from_markdown(md_text: str, output_path: str) -> None:
+    doc = DocxDocument()
+    for line in md_text.splitlines():
+        if line.startswith('# '):
+            doc.add_heading(line[2:].strip(), level=1)
+        elif line.startswith('## '):
+            doc.add_heading(line[3:].strip(), level=2)
+        elif line.startswith('### '):
+            doc.add_heading(line[4:].strip(), level=3)
+        else:
+            doc.add_paragraph(line)
+    doc.save(output_path)
+
+def _export_pdf_simple(text: str, output_path: str) -> None:
+    c = canvas.Canvas(output_path, pagesize=A4)
+    width, height = A4
+    x, y = 40, height - 40
+    max_width = width - 80
+    for raw_line in text.splitlines():
+        line = raw_line.replace('\t', '    ')
+        while line:
+            # простая обрезка строки по ширине
+            cut = line
+            while c.stringWidth(cut) > max_width and len(cut) > 1:
+                cut = cut[:-1]
+            c.drawString(x, y, cut)
+            line = line[len(cut):]
+            y -= 16
+            if y < 40:
+                c.showPage()
+                y = height - 40
+    c.showPage()
+    c.save()
+
+
 def convert_single_file(json_file_path: str, dest_dir: str, settings: Dict[str, Any]) -> bool:
     """
     Конвертирует один JSON файл в формат Markdown/HTML.
@@ -536,10 +574,14 @@ def convert_single_file(json_file_path: str, dest_dir: str, settings: Dict[str, 
         export_format = (settings.get('export_format') or 'md').lower()
         write_md = export_format in ('md', 'both')
         write_html = export_format in ('html', 'both')
+        write_pdf = bool(settings.get('export_pdf'))
+        write_docx = bool(settings.get('export_docx'))
 
         # Полные пути
         md_output_path = os.path.join(final_dest_dir, md_filename)
         html_output_path = os.path.join(final_dest_dir, html_filename)
+        pdf_output_path = os.path.join(final_dest_dir, f"{base_name}.pdf")
+        docx_output_path = os.path.join(final_dest_dir, f"{base_name}.docx")
 
         # DRY-RUN
         if settings.get('dry_run', False):
@@ -553,6 +595,12 @@ def convert_single_file(json_file_path: str, dest_dir: str, settings: Dict[str, 
         if write_html and os.path.exists(html_output_path) and not settings.get("overwrite_existing", False):
             logging.warning(f"Файл {html_output_path} уже существует. Пропускаем без ошибки.")
             write_html = False
+        if write_pdf and os.path.exists(pdf_output_path) and not settings.get("overwrite_existing", False):
+            logging.warning(f"Файл {pdf_output_path} уже существует. Пропускаем без ошибки.")
+            write_pdf = False
+        if write_docx and os.path.exists(docx_output_path) and not settings.get("overwrite_existing", False):
+            logging.warning(f"Файл {docx_output_path} уже существует. Пропускаем без ошибки.")
+            write_docx = False
 
         # Записываем MD
         if write_md:
@@ -574,7 +622,20 @@ def convert_single_file(json_file_path: str, dest_dir: str, settings: Dict[str, 
             html_text = _render_html_from_markdown(md_for_html, settings_with_fallback, context)
             with open(html_output_path, 'w', encoding='utf-8') as f:
                 f.write(html_text)
-        
+
+        # PDF и DOCX из Markdown (грубая конвертация текста)
+        text_for_other = md_final
+        if write_pdf:
+            try:
+                _export_pdf_simple(text_for_other, pdf_output_path)
+            except Exception as e:
+                logging.warning(f"PDF экспорт не удался: {e}")
+        if write_docx:
+            try:
+                _export_docx_from_markdown(text_for_other, docx_output_path)
+            except Exception as e:
+                logging.warning(f"DOCX экспорт не удался: {e}")
+
         logging.info(f"Успешно конвертирован: {json_file_path} -> {final_dest_dir}")
         return True
         
@@ -793,6 +854,22 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
         # Логируем результаты
         logging.info(f"Конвертация завершена. Успешно: {successful_conversions}, Ошибок: {failed_conversions}")
         
+        # Сгенерировать индекс по папке
+        try:
+            index_md = os.path.join(dest_dir, 'index.md')
+            lines = ["# Index", ""]
+            for root, _, files in os.walk(dest_dir):
+                rel_root = os.path.relpath(root, dest_dir)
+                for f in sorted(files):
+                    if f.endswith('.md') and f != 'index.md':
+                        rel_path = os.path.join(rel_root, f)
+                        lines.append(f"- [{f}]({rel_path})")
+            with open(index_md, 'w', encoding='utf-8') as wf:
+                wf.write("\n".join(lines))
+            progress_queue.put({"type": "info", "message": f"Индекс создан: {index_md}"})
+        except Exception as e:
+            progress_queue.put({"type": "warning", "message": f"Не удалось создать индекс: {e}"})
+
         # Упаковка в ZIP, если включено
         if settings.get('zip_output'):
             zip_name = settings.get('zip_name') or f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -803,7 +880,7 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
                 with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
                     for root, _, files in os.walk(dest_dir):
                         for f in files:
-                            if os.path.splitext(f)[1].lower() in exts:
+                            if os.path.splitext(f)[1].lower() in exts or f.endswith('.pdf') or f.endswith('.docx'):
                                 full = os.path.join(root, f)
                                 if os.path.getmtime(full) >= created_after:
                                     arcname = os.path.relpath(full, dest_dir)

@@ -64,6 +64,8 @@ def main() -> int:
     parser.add_argument('--exclude', dest='exclude_globs', default='', help='Semicolon-separated glob patterns to exclude, relative to src')
     parser.add_argument('--zip', dest='zip_output', action='store_true', help='Zip outputs (md/html) created during this run')
     parser.add_argument('--zip-name', dest='zip_name', default='', help='Zip file name without extension')
+    parser.add_argument('--pdf', dest='export_pdf', action='store_true', help='Export PDF alongside Markdown/HTML')
+    parser.add_argument('--docx', dest='export_docx', action='store_true', help='Export DOCX alongside Markdown/HTML')
 
     args = parser.parse_args()
 
@@ -96,6 +98,8 @@ def main() -> int:
         'exclude_globs': args.exclude_globs,
         'zip_output': bool(args.zip_output),
         'zip_name': args.zip_name.strip(),
+        'export_pdf': bool(args.export_pdf),
+        'export_docx': bool(args.export_docx),
     })
 
     # Обработка отмены (Ctrl+C)
