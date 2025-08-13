@@ -310,6 +310,12 @@ class MainWindow:
         row4 = ctk.CTkFrame(settings_grid)
         row4.pack(fill="x", pady=4)
 
+        theme_label = ctk.CTkLabel(row4, text="Тема:")
+        theme_label.pack(side="left", padx=(8, 4), pady=6)
+        self.theme_var = tk.StringVar(value=self.settings.get("theme", "default"))
+        theme_menu = ctk.CTkOptionMenu(row4, values=["default","custom"], variable=self.theme_var)
+        theme_menu.pack(side="left", padx=(0, 12), pady=6)
+
         self.include_run_settings_var = tk.BooleanVar(value=self.settings.get("include_run_settings", True))
         include_run_checkbox = ctk.CTkCheckBox(
             row4,
@@ -498,6 +504,12 @@ class MainWindow:
             state="disabled"
         )
         self.watch_stop_button.pack(side="left", padx=8, pady=4)
+
+        # Пресеты настроек
+        preset_frame = ctk.CTkFrame(control_frame)
+        preset_frame.pack(pady=4)
+        ctk.CTkButton(preset_frame, text="⬇️ Загрузить пресет", height=34, command=self.load_preset).pack(side="left", padx=8)
+        ctk.CTkButton(preset_frame, text="⬆️ Сохранить пресет", height=34, command=self.save_preset).pack(side="left", padx=8)
     
     def create_progress_section(self, parent):
         """Создает секцию прогресса и логов."""
@@ -651,6 +663,7 @@ class MainWindow:
                 "source_format": self.source_format_var.get(),
                 "source_dir": self.source_entry.get().strip(),
                 "dest_dir": self.dest_entry.get().strip(),
+                "theme": self.theme_var.get(),
                 "include_metadata": self.include_metadata_var.get(),
                 "include_timestamps": self.include_timestamps_var.get(),
                 "include_system_prompt": self.include_system_prompt_var.get(),
@@ -706,6 +719,7 @@ class MainWindow:
                 self.dest_entry.delete(0, tk.END)
                 
                 self.source_format_var.set("auto")
+                self.theme_var.set("default")
                 self.include_metadata_var.set(True)
                 self.include_system_prompt_var.set(True)
                 self.overwrite_existing_var.set(False)
@@ -757,6 +771,7 @@ class MainWindow:
             "source_format": self.source_format_var.get(),
             "source_dir": source_dir,
             "dest_dir": dest_dir,
+            "theme": self.theme_var.get(),
             "include_metadata": self.include_metadata_var.get(),
             "include_timestamps": self.include_timestamps_var.get(),
             "include_system_prompt": self.include_system_prompt_var.get(),
@@ -973,3 +988,71 @@ class MainWindow:
                 self.source_entry.insert(0, value)
         except Exception:
             pass
+
+    def load_preset(self):
+        try:
+            path = filedialog.askopenfilename(title="Загрузить пресет", filetypes=[("JSON", "*.json"), ("All","*.*")])
+            if not path:
+                return
+            with open(path, 'r', encoding='utf-8') as f:
+                preset = json.load(f)
+            # Обновляем основные поля
+            self.source_format_var.set(preset.get('source_format', 'auto'))
+            self.theme_var.set(preset.get('theme', 'default'))
+            self.include_metadata_var.set(preset.get('include_metadata', True))
+            self.include_timestamps_var.set(preset.get('include_timestamps', False))
+            self.include_system_prompt_var.set(preset.get('include_system_prompt', True))
+            self.include_run_settings_var.set(preset.get('include_run_settings', True))
+            self.exclude_thoughts_var.set(preset.get('exclude_thoughts', True))
+            self.include_json_structure_var.set(preset.get('include_json_structure', False))
+            self.add_file_headers_var.set(preset.get('add_file_headers', True))
+            self.export_format_var.set(preset.get('export_format', 'md'))
+            self.workers_var.set(int(preset.get('workers', 4)))
+            self.workers_slider.set(float(self.workers_var.get()))
+            self.template_entry.delete(0, tk.END); self.template_entry.insert(0, preset.get('template_path', ''))
+            self.html_template_entry.delete(0, tk.END); self.html_template_entry.insert(0, preset.get('html_template_path', ''))
+            self.enable_yaml_front_matter_var.set(preset.get('enable_yaml_front_matter', False))
+            self.dry_run_var.set(preset.get('dry_run', False))
+            self.rename_extensionless_var.set(preset.get('rename_extensionless', False))
+            self.include_entry.delete(0, tk.END); self.include_entry.insert(0, preset.get('include_globs', ''))
+            self.exclude_entry.delete(0, tk.END); self.exclude_entry.insert(0, preset.get('exclude_globs', ''))
+            self.zip_output_var.set(preset.get('zip_output', False))
+            self.zip_name_entry.delete(0, tk.END); self.zip_name_entry.insert(0, preset.get('zip_name', ''))
+            self.log_message("⬇️ Пресет загружен", "info")
+        except Exception as e:
+            self.log_message(f"❌ Ошибка загрузки пресета: {e}", "error")
+            messagebox.showerror("Ошибка", f"Не удалось загрузить пресет: {e}")
+
+    def save_preset(self):
+        try:
+            path = filedialog.asksaveasfilename(title="Сохранить пресет", defaultextension=".json", filetypes=[("JSON","*.json")])
+            if not path:
+                return
+            preset = {
+                "source_format": self.source_format_var.get(),
+                "theme": self.theme_var.get(),
+                "include_metadata": self.include_metadata_var.get(),
+                "include_timestamps": self.include_timestamps_var.get(),
+                "include_system_prompt": self.include_system_prompt_var.get(),
+                "include_run_settings": self.include_run_settings_var.get(),
+                "exclude_thoughts": self.exclude_thoughts_var.get(),
+                "include_json_structure": self.include_json_structure_var.get(),
+                "add_file_headers": self.add_file_headers_var.get(),
+                "export_format": self.export_format_var.get(),
+                "workers": int(self.workers_var.get()),
+                "template_path": self.template_entry.get().strip(),
+                "html_template_path": self.html_template_entry.get().strip(),
+                "enable_yaml_front_matter": self.enable_yaml_front_matter_var.get(),
+                "dry_run": self.dry_run_var.get(),
+                "rename_extensionless": self.rename_extensionless_var.get(),
+                "include_globs": self.include_entry.get().strip(),
+                "exclude_globs": self.exclude_entry.get().strip(),
+                "zip_output": self.zip_output_var.get(),
+                "zip_name": self.zip_name_entry.get().strip(),
+            }
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(preset, f, indent=2, ensure_ascii=False)
+            self.log_message("⬆️ Пресет сохранен", "success")
+        except Exception as e:
+            self.log_message(f"❌ Ошибка сохранения пресета: {e}", "error")
+            messagebox.showerror("Ошибка", f"Не удалось сохранить пресет: {e}")

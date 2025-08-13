@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import time
 from typing import Dict, Any
 
 from watchdog.observers import Observer
@@ -23,6 +24,8 @@ class _JsonEventHandler(FileSystemEventHandler):
         self.settings = settings
         self.progress_queue = progress_queue
         self._lock = threading.Lock()
+        self._last_seen: Dict[str, float] = {}
+        self._debounce_sec = 0.5
 
     def on_any_event(self, event: FileSystemEvent):
         if event.is_directory:
@@ -30,7 +33,11 @@ class _JsonEventHandler(FileSystemEventHandler):
         path = event.src_path
         if not str(path).lower().endswith('.json'):
             return
-        # Дедупликация быстрых последовательных событий
+        now = time.time()
+        last = self._last_seen.get(path, 0.0)
+        if now - last < self._debounce_sec:
+            return
+        self._last_seen[path] = now
         with self._lock:
             try:
                 ok = convert_single_file(path, self.dest_dir, self.settings)

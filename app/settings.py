@@ -44,6 +44,9 @@ def get_default_settings() -> Dict[str, Any]:
         # Источник данных
         "source_format": "auto",  # auto | aistudio | chatgpt | claude
 
+        # Тема/пресет шаблонов
+        "theme": "default",
+
         # Поведение конвертера / рендеринг
         "include_metadata": True,
         "include_timestamps": False,

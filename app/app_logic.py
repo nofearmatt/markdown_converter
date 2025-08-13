@@ -25,6 +25,8 @@ from docx import Document as DocxDocument
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 
+TEMPLATE_CACHE: Dict[str, Environment] = {}
+
 
 def ensure_destination_directory(dest_dir: str) -> bool:
     """
@@ -382,8 +384,16 @@ def _find_inline_attachments(data: Any) -> List[Tuple[Optional[str], Optional[st
 
 def _render_markdown_with_template(md_text: str, settings: Dict[str, Any], context: Dict[str, Any]) -> str:
     template_path = settings.get('template_path') or ''
+    # Тема по умолчанию
+    if not template_path and settings.get('theme') == 'default':
+        candidate = os.path.join(os.path.dirname(__file__), '..', 'examples', 'templates', 'md_default.j2')
+        template_path = os.path.abspath(candidate)
     if template_path and os.path.exists(template_path):
-        env = Environment(loader=FileSystemLoader(os.path.dirname(template_path)), autoescape=False)
+        key = os.path.dirname(template_path)
+        env = TEMPLATE_CACHE.get(key)
+        if env is None:
+            env = Environment(loader=FileSystemLoader(os.path.dirname(template_path)), autoescape=False)
+            TEMPLATE_CACHE[key] = env
         template = env.get_template(os.path.basename(template_path))
         return template.render({**context, 'content': md_text})
     return md_text
@@ -415,8 +425,15 @@ def _build_front_matter(data: Dict[str, Any], run_settings: Dict[str, Any], sett
 def _render_html_from_markdown(md_text_without_yaml: str, settings: Dict[str, Any], context: Dict[str, Any]) -> str:
     html_body = md.markdown(md_text_without_yaml, extensions=['fenced_code', 'tables'])
     html_template_path = settings.get('html_template_path') or ''
+    if not html_template_path and settings.get('theme') == 'default':
+        candidate = os.path.join(os.path.dirname(__file__), '..', 'examples', 'templates', 'html_default.j2')
+        html_template_path = os.path.abspath(candidate)
     if html_template_path and os.path.exists(html_template_path):
-        env = Environment(loader=FileSystemLoader(os.path.dirname(html_template_path)), autoescape=False)
+        key = os.path.dirname(html_template_path)
+        env = TEMPLATE_CACHE.get(key)
+        if env is None:
+            env = Environment(loader=FileSystemLoader(os.path.dirname(html_template_path)), autoescape=False)
+            TEMPLATE_CACHE[key] = env
         template = env.get_template(os.path.basename(html_template_path))
         return template.render({**context, 'content_html': html_body, 'content_markdown': md_text_without_yaml})
     # Fallback простой HTML
