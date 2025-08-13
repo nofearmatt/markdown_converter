@@ -42,6 +42,7 @@ def main() -> int:
     parser.add_argument('--src', required=True, help='Source directory with JSON files')
     parser.add_argument('--dst', required=True, help='Destination directory')
     parser.add_argument('--format', default='md', choices=['md', 'html', 'both'], help='Export format')
+    parser.add_argument('--format-src', dest='source_format', default='auto', choices=['auto','aistudio','chatgpt','claude'], help='Input source format')
     parser.add_argument('--yaml', action='store_true', help='Enable YAML front matter')
     parser.add_argument('--timestamps', action='store_true', help='Include timestamps section')
     parser.add_argument('--system-prompt', dest='system_prompt', action='store_true', help='Include system prompt')
@@ -72,6 +73,7 @@ def main() -> int:
 
     settings = load_settings()
     settings.update({
+        'source_format': args.source_format,
         'source_dir': src,
         'dest_dir': dst,
         'include_metadata': True,

@@ -20,6 +20,7 @@ import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from jinja2 import Environment, FileSystemLoader
 import markdown as md
+from app.adapters import normalize_conversation
 
 
 def ensure_destination_directory(dest_dir: str) -> bool:
@@ -108,7 +109,19 @@ def log_conversion_process(source_dir: str, dest_dir: str, settings: Dict[str, A
     logging.info("=" * 60)
     logging.info(f"Исходная папка: {source_dir}")
     logging.info(f"Папка назначения: {dest_dir}")
-    logging.info(f"Настройки: {json.dumps(settings, indent=2, ensure_ascii=False)}")
+    def _safe(v):
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            return v
+        if isinstance(v, (list, tuple)):
+            return [_safe(x) for x in v]
+        if isinstance(v, dict):
+            return {k: _safe(vv) for k, vv in v.items() if k != 'cancel_event'}
+        return str(v)
+    try:
+        safe_settings = _safe(settings)
+        logging.info(f"Настройки: {json.dumps(safe_settings, indent=2, ensure_ascii=False)}")
+    except Exception:
+        logging.info("Настройки: <unprintable>")
     logging.info("=" * 60)
 
 
@@ -232,42 +245,21 @@ def extract_markdown_content(data: Dict[str, Any], settings: Dict[str, Any]) -> 
         return ''
 
     def collect_messages() -> List[Dict[str, Any]]:
+        # Используем адаптер нормализации для универсального извлечения
+        prefer = (settings.get('source_format') or 'auto').lower()
+        normalized = normalize_conversation(data, prefer=prefer)
         messages: List[Dict[str, Any]] = []
-        # 1) Явный массив messages
-        explicit = data.get('messages')
-        if isinstance(explicit, list):
-            for item in explicit:
-                if not isinstance(item, dict):
-                    continue
-                text = item.get('content') or item.get('text')
-                if isinstance(text, list):
-                    text = _join_parts(text)
-                if not text:
-                    continue
-                messages.append({
-                    'role': item.get('role'),
-                    'content': text,
-                    'timestamp': item.get('timestamp') or item.get('time')
-                })
-
-        # 2) chunkedPrompt.chunks
-        if not messages:
-            chunks = first_of(['chunkedPrompt.chunks'], [])
-            if isinstance(chunks, list):
-                for ch in chunks:
-                    if not isinstance(ch, dict):
-                        continue
-                    if settings.get('exclude_thoughts', True) and ch.get('isThought'):
-                        continue
-                    text_val = ch.get('text') or _join_parts(ch.get('parts'))
-                    if not text_val:
-                        continue
-                    messages.append({
-                        'role': ch.get('role') or 'model',
-                        'content': text_val,
-                        'timestamp': ch.get('timestamp') or ch.get('time')
-                    })
-
+        for item in normalized:
+            if not isinstance(item, dict):
+                continue
+            text = item.get('content') or ''
+            if not text:
+                continue
+            messages.append({
+                'role': item.get('role'),
+                'content': text,
+                'timestamp': item.get('timestamp')
+            })
         return messages
 
     md_lines: List[str] = []

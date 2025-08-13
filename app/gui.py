@@ -214,7 +214,14 @@ class MainWindow:
         # Первая строка настроек
         row1 = ctk.CTkFrame(settings_grid)
         row1.pack(fill="x", pady=4)
-        
+
+        # Формат источника
+        source_fmt_label = ctk.CTkLabel(row1, text="Источник:")
+        source_fmt_label.pack(side="left", padx=(8, 4), pady=6)
+        self.source_format_var = tk.StringVar(value=(self.settings.get("source_format") or "auto"))
+        source_fmt_menu = ctk.CTkOptionMenu(row1, values=["auto","aistudio","chatgpt","claude"], variable=self.source_format_var)
+        source_fmt_menu.pack(side="left", padx=(0, 12), pady=6)
+
         self.include_metadata_var = tk.BooleanVar(value=self.settings.get("include_metadata", True))
         metadata_checkbox = ctk.CTkCheckBox(
             row1,
@@ -605,6 +612,7 @@ class MainWindow:
         try:
             # Собираем настройки из интерфейса
             current_settings = {
+                "source_format": self.source_format_var.get(),
                 "source_dir": self.source_entry.get().strip(),
                 "dest_dir": self.dest_entry.get().strip(),
                 "include_metadata": self.include_metadata_var.get(),
@@ -654,6 +662,7 @@ class MainWindow:
                 self.source_entry.delete(0, tk.END)
                 self.dest_entry.delete(0, tk.END)
                 
+                self.source_format_var.set("auto")
                 self.include_metadata_var.set(True)
                 self.include_system_prompt_var.set(True)
                 self.overwrite_existing_var.set(False)
@@ -702,6 +711,7 @@ class MainWindow:
         
         # Собираем настройки
         conversion_settings = {
+            "source_format": self.source_format_var.get(),
             "source_dir": source_dir,
             "dest_dir": dest_dir,
             "include_metadata": self.include_metadata_var.get(),

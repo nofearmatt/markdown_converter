@@ -41,6 +41,9 @@ def get_default_settings() -> Dict[str, Any]:
         "source_dir": "",
         "dest_dir": "",
 
+        # Источник данных
+        "source_format": "auto",  # auto | aistudio | chatgpt | claude
+
         # Поведение конвертера / рендеринг
         "include_metadata": True,
         "include_timestamps": False,
