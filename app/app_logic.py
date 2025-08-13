@@ -14,6 +14,9 @@ from typing import Dict, Any, List, Optional, Tuple
 import base64
 import mimetypes
 import threading
+import time
+import fnmatch
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from jinja2 import Environment, FileSystemLoader
 import markdown as md
@@ -679,6 +682,34 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
                 if file.lower().endswith('.json'):
                     json_files.append(os.path.join(root, file))
         
+        # Фильтрация include/exclude по glob
+        include_globs: List[str] = []
+        exclude_globs: List[str] = []
+        inc = settings.get('include_globs') or settings.get('include_glob')
+        exc = settings.get('exclude_globs') or settings.get('exclude_glob')
+        if isinstance(inc, str) and inc.strip():
+            include_globs = [p.strip() for p in inc.split(';') if p.strip()]
+        elif isinstance(inc, list):
+            include_globs = [str(p) for p in inc]
+        if isinstance(exc, str) and exc.strip():
+            exclude_globs = [p.strip() for p in exc.split(';') if p.strip()]
+        elif isinstance(exc, list):
+            exclude_globs = [str(p) for p in exc]
+
+        if include_globs or exclude_globs:
+            filtered: List[str] = []
+            for p in json_files:
+                rel = os.path.relpath(p, source_dir)
+                keep = True
+                if include_globs:
+                    keep = any(fnmatch.fnmatch(rel, pat) for pat in include_globs)
+                if keep and exclude_globs:
+                    if any(fnmatch.fnmatch(rel, pat) for pat in exclude_globs):
+                        keep = False
+                if keep:
+                    filtered.append(p)
+            json_files = filtered
+
         if not json_files:
             progress_queue.put({
                 "type": "info",
@@ -699,12 +730,19 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
         completed = 0
         workers = max(1, int(settings.get('workers', 1)))
 
+        # Отмена и ETA
+        cancel_event: Optional[threading.Event] = settings.get('cancel_event') if isinstance(settings.get('cancel_event'), threading.Event) else None
+        start_ts = time.time()
+        last_progress_emit = 0.0
+
         def _convert_wrapper(path: str) -> Tuple[str, bool]:
             ok = convert_single_file(path, dest_dir, settings)
             return path, ok
 
         if workers == 1:
             for i, json_file in enumerate(json_files):
+                if cancel_event and cancel_event.is_set():
+                    break
                 progress_queue.put({
                     "type": "progress",
                     "value": int((i / total) * 100),
@@ -715,10 +753,22 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
                 else:
                     failed_conversions += 1
                 completed += 1
+                # ETA
+                dt = time.time() - start_ts
+                if completed > 0 and dt > 0 and (time.time() - last_progress_emit) > 0.5:
+                    avg = dt / completed
+                    remain = max(0, int((total - completed) * avg))
+                    progress_queue.put({
+                        "type": "info",
+                        "message": f"ETA ~ {remain}s"
+                    })
+                    last_progress_emit = time.time()
         else:
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 future_to_path = {executor.submit(_convert_wrapper, p): p for p in json_files}
                 for fut in as_completed(future_to_path):
+                    if cancel_event and cancel_event.is_set():
+                        break
                     path, ok = fut.result()
                     completed += 1
                     if ok:
@@ -730,7 +780,17 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
                         "value": int((completed / total) * 100),
                         "message": f"Готово {completed}/{total}: {os.path.basename(path)}"
                     })
-
+                    # ETA
+                    dt = time.time() - start_ts
+                    if completed > 0 and dt > 0 and (time.time() - last_progress_emit) > 0.5:
+                        avg = dt / completed
+                        remain = max(0, int((total - completed) * avg))
+                        progress_queue.put({
+                            "type": "info",
+                            "message": f"ETA ~ {remain}s"
+                        })
+                        last_progress_emit = time.time()
+ 
         # Отправляем финальный прогресс
         progress_queue.put({
             "type": "progress",
@@ -741,6 +801,25 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
         # Логируем результаты
         logging.info(f"Конвертация завершена. Успешно: {successful_conversions}, Ошибок: {failed_conversions}")
         
+        # Упаковка в ZIP, если включено
+        if settings.get('zip_output'):
+            zip_name = settings.get('zip_name') or f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            zip_path = os.path.join(dest_dir, f"{zip_name}.zip")
+            created_after = start_ts - 1  # небольшая фора
+            exts = {'.md', '.html'}
+            try:
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for root, _, files in os.walk(dest_dir):
+                        for f in files:
+                            if os.path.splitext(f)[1].lower() in exts:
+                                full = os.path.join(root, f)
+                                if os.path.getmtime(full) >= created_after:
+                                    arcname = os.path.relpath(full, dest_dir)
+                                    zf.write(full, arcname)
+                progress_queue.put({"type": "info", "message": f"ZIP создан: {zip_path}"})
+            except Exception as e:
+                progress_queue.put({"type": "warning", "message": f"Не удалось создать ZIP: {e}"})
+
         # Отправляем финальное сообщение
         if failed_conversions == 0:
             progress_queue.put({

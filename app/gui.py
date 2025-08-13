@@ -349,6 +349,22 @@ class MainWindow:
         self.workers_slider.set(float(self.workers_var.get()))
         self.workers_slider.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=6)
 
+        # Седьмая b: include/exclude
+        row7b = ctk.CTkFrame(settings_grid)
+        row7b.pack(fill="x", pady=4)
+        incl_label = ctk.CTkLabel(row7b, text="Include (glob; ;):")
+        incl_label.pack(side="left", padx=(8, 4), pady=6)
+        self.include_entry = ctk.CTkEntry(row7b, placeholder_text="*.json;subdir/*.json", height=30)
+        self.include_entry.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=6)
+        if self.settings.get("include_globs"):
+            self.include_entry.insert(0, self.settings.get("include_globs"))
+        excl_label = ctk.CTkLabel(row7b, text="Exclude (glob; ;):")
+        excl_label.pack(side="left", padx=(8, 4), pady=6)
+        self.exclude_entry = ctk.CTkEntry(row7b, placeholder_text="*_draft.json;temp/*.json", height=30)
+        self.exclude_entry.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=6)
+        if self.settings.get("exclude_globs"):
+            self.exclude_entry.insert(0, self.settings.get("exclude_globs"))
+
         # Восьмая строка: шаблон Markdown
         row8 = ctk.CTkFrame(settings_grid)
         row8.pack(fill="x", pady=4)
@@ -374,6 +390,22 @@ class MainWindow:
             self.html_template_entry.insert(0, self.settings.get("html_template_path"))
         htpl_btn = ctk.CTkButton(row9, text="Выбрать", width=80, command=self.browse_html_template_file)
         htpl_btn.pack(side="left", padx=(0, 8), pady=6)
+
+        # Десятая строка: упаковка в ZIP
+        row10 = ctk.CTkFrame(settings_grid)
+        row10.pack(fill="x", pady=4)
+        self.zip_output_var = tk.BooleanVar(value=self.settings.get("zip_output", False))
+        zip_checkbox = ctk.CTkCheckBox(row10, text="Упаковать результат в ZIP", variable=self.zip_output_var)
+        zip_checkbox.pack(side="left", padx=8, pady=6)
+        self.zip_name_entry = ctk.CTkEntry(row10, placeholder_text="Имя ZIP (необязательно)", height=30)
+        self.zip_name_entry.pack(side="left", fill="x", expand=True, padx=(0, 12), pady=6)
+        if self.settings.get("zip_name"):
+            self.zip_name_entry.insert(0, self.settings.get("zip_name"))
+
+        # Кнопка отмены
+        self.cancel_event = threading.Event()
+        cancel_button = ctk.CTkButton(settings_frame, text="⏹ Отменить текущую задачу", height=32, command=lambda: self.cancel_event.set())
+        cancel_button.pack(pady=(6, 0))
     
     def create_control_section(self, parent):
         """Создает секцию кнопок управления."""
@@ -591,6 +623,10 @@ class MainWindow:
                 "template_path": self.template_entry.get().strip(),
                 "html_template_path": self.html_template_entry.get().strip(),
                 "enable_yaml_front_matter": self.enable_yaml_front_matter_var.get(),
+                "include_globs": self.include_entry.get().strip(),
+                "exclude_globs": self.exclude_entry.get().strip(),
+                "zip_output": self.zip_output_var.get(),
+                "zip_name": self.zip_name_entry.get().strip(),
             }
             
             # Сохраняем настройки
@@ -635,6 +671,10 @@ class MainWindow:
                 self.workers_slider.set(4)
                 self.template_entry.delete(0, tk.END)
                 self.html_template_entry.delete(0, tk.END)
+                self.include_entry.delete(0, tk.END)
+                self.exclude_entry.delete(0, tk.END)
+                self.zip_output_var.set(False)
+                self.zip_name_entry.delete(0, tk.END)
                 
                 self.log_message("🔄 Настройки сброшены к значениям по умолчанию", "info")
                 messagebox.showinfo("Успех", "Настройки сброшены к значениям по умолчанию!")
@@ -680,7 +720,12 @@ class MainWindow:
             "template_path": self.template_entry.get().strip(),
             "html_template_path": self.html_template_entry.get().strip(),
             "enable_yaml_front_matter": self.enable_yaml_front_matter_var.get(),
+            "include_globs": self.include_entry.get().strip(),
+            "exclude_globs": self.exclude_entry.get().strip(),
+            "zip_output": self.zip_output_var.get(),
+            "zip_name": self.zip_name_entry.get().strip(),
         }
+        conversion_settings["cancel_event"] = self.cancel_event
         
         # Отключаем кнопку конвертации
         self.convert_button.configure(state="disabled")
@@ -847,6 +892,10 @@ class MainWindow:
             "template_path": self.template_entry.get().strip(),
             "html_template_path": self.html_template_entry.get().strip(),
             "enable_yaml_front_matter": self.enable_yaml_front_matter_var.get(),
+            "include_globs": self.include_entry.get().strip(),
+            "exclude_globs": self.exclude_entry.get().strip(),
+            "zip_output": self.zip_output_var.get(),
+            "zip_name": self.zip_name_entry.get().strip(),
         }
         self.watcher = DirectoryWatcher(source_dir, dest_dir, settings, self.progress_queue)
         self.watcher.start()

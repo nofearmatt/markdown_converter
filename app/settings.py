@@ -62,7 +62,16 @@ def get_default_settings() -> Dict[str, Any]:
         "template_path": "",     # путь к Jinja2 шаблону Markdown
         "html_template_path": "", # путь к Jinja2 шаблону HTML
         "enable_yaml_front_matter": False,
-        "watch_enabled": False
+        "watch_enabled": False,
+
+        # Доп. форматы и упаковка
+        "export_pdf": False,
+        "export_docx": False,
+        "zip_output": False,
+        "zip_name": "",
+
+        # Недавние проекты
+        "recent_projects": []
     }
 
 

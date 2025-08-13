@@ -12,6 +12,7 @@ import os
 import sys
 import argparse
 import queue
+import threading
 
 # Добавляем корень проекта в путь
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -58,6 +59,10 @@ def main() -> int:
     parser.add_argument('--rename-extensionless', action='store_true', help='Rename extensionless files in source to .json')
     parser.add_argument('--template', default='', help='Path to Jinja2 template for Markdown')
     parser.add_argument('--html-template', default='', help='Path to Jinja2 template for HTML')
+    parser.add_argument('--include', dest='include_globs', default='', help='Semicolon-separated glob patterns to include, relative to src')
+    parser.add_argument('--exclude', dest='exclude_globs', default='', help='Semicolon-separated glob patterns to exclude, relative to src')
+    parser.add_argument('--zip', dest='zip_output', action='store_true', help='Zip outputs (md/html) created during this run')
+    parser.add_argument('--zip-name', dest='zip_name', default='', help='Zip file name without extension')
 
     args = parser.parse_args()
 
@@ -85,10 +90,22 @@ def main() -> int:
         'template_path': args.template,
         'html_template_path': args.html_template,
         'enable_yaml_front_matter': bool(args.yaml),
+        'include_globs': args.include_globs,
+        'exclude_globs': args.exclude_globs,
+        'zip_output': bool(args.zip_output),
+        'zip_name': args.zip_name.strip(),
     })
 
+    # Обработка отмены (Ctrl+C)
+    cancel_event = threading.Event()
+    settings['cancel_event'] = cancel_event
+
     q = _DummyQueue()
-    convert_files(src, dst, settings, q)
+    try:
+        convert_files(src, dst, settings, q)
+    except KeyboardInterrupt:
+        cancel_event.set()
+        print("\nОтмена по запросу пользователя...")
     print("\nГотово.")
     return 0
 
