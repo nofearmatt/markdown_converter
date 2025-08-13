@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Пакетная конвертация JSON -> Markdown/HTML через CLI.
+Примеры:
+  python scripts/convert_batch.py --src ./input --dst ./out --workers 8 --format both --yaml --overwrite
+  python scripts/convert_batch.py --src ./input --dst ./out --dry-run
+"""
+from __future__ import annotations
+
+import os
+import sys
+import argparse
+import queue
+
+# Добавляем корень проекта в путь
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from app.settings import load_settings
+from app.app_logic import convert_files
+
+
+class _DummyQueue:
+    def __init__(self):
+        self._q = queue.Queue()
+    def put(self, msg):
+        # Печатаем краткие сообщения в stdout
+        t = msg.get('type')
+        if t == 'progress':
+            val = msg.get('value')
+            sys.stdout.write(f"\r[{val:3d}%] {msg.get('message','')}    ")
+            sys.stdout.flush()
+        else:
+            print(f"[{t}] {msg.get('message','')}")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Batch convert AI Studio JSON to Markdown/HTML")
+    parser.add_argument('--src', required=True, help='Source directory with JSON files')
+    parser.add_argument('--dst', required=True, help='Destination directory')
+    parser.add_argument('--format', default='md', choices=['md', 'html', 'both'], help='Export format')
+    parser.add_argument('--yaml', action='store_true', help='Enable YAML front matter')
+    parser.add_argument('--timestamps', action='store_true', help='Include timestamps section')
+    parser.add_argument('--system-prompt', dest='system_prompt', action='store_true', help='Include system prompt')
+    parser.add_argument('--no-system-prompt', dest='system_prompt', action='store_false', help='Exclude system prompt')
+    parser.set_defaults(system_prompt=True)
+    parser.add_argument('--run-settings', dest='run_settings', action='store_true', help='Include run settings details')
+    parser.add_argument('--no-run-settings', dest='run_settings', action='store_false')
+    parser.set_defaults(run_settings=True)
+    parser.add_argument('--include-json', action='store_true', help='Append full JSON structure block')
+    parser.add_argument('--workers', type=int, default=4, help='Parallel workers (threads)')
+    parser.add_argument('--overwrite', action='store_true', help='Overwrite existing output files')
+    parser.add_argument('--no-subfolders', dest='create_subfolders', action='store_false', help='Do not recreate input subfolders in output')
+    parser.set_defaults(create_subfolders=True)
+    parser.add_argument('--dry-run', action='store_true', help='Do not write files, only simulate')
+    parser.add_argument('--rename-extensionless', action='store_true', help='Rename extensionless files in source to .json')
+    parser.add_argument('--template', default='', help='Path to Jinja2 template for Markdown')
+    parser.add_argument('--html-template', default='', help='Path to Jinja2 template for HTML')
+
+    args = parser.parse_args()
+
+    src = os.path.abspath(args.src)
+    dst = os.path.abspath(args.dst)
+    os.makedirs(dst, exist_ok=True)
+
+    settings = load_settings()
+    settings.update({
+        'source_dir': src,
+        'dest_dir': dst,
+        'include_metadata': True,
+        'include_timestamps': bool(args.timestamps),
+        'include_system_prompt': bool(args.system_prompt),
+        'overwrite_existing': bool(args.overwrite),
+        'create_subfolders': bool(args.create_subfolders),
+        'include_json_structure': bool(args.include_json),
+        'add_file_headers': True,
+        'include_run_settings': bool(args.run_settings),
+        'exclude_thoughts': True,
+        'dry_run': bool(args.dry_run),
+        'rename_extensionless': bool(args.rename_extensionless),
+        'workers': max(1, int(args.workers)),
+        'export_format': args.format,
+        'template_path': args.template,
+        'html_template_path': args.html_template,
+        'enable_yaml_front_matter': bool(args.yaml),
+    })
+
+    q = _DummyQueue()
+    convert_files(src, dst, settings, q)
+    print("\nГотово.")
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())
