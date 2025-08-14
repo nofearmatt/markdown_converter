@@ -9,7 +9,24 @@ import os
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
+
+import base64
+import mimetypes
+import threading
+import time
+import fnmatch
+import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from jinja2 import Environment, FileSystemLoader
+import markdown as md
+from app.adapters import normalize_conversation
+from docx import Document as DocxDocument
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
+TEMPLATE_CACHE: Dict[str, Environment] = {}
+
 
 def ensure_destination_directory(dest_dir: str) -> bool:
     """
@@ -27,6 +44,7 @@ def ensure_destination_directory(dest_dir: str) -> bool:
     except Exception as e:
         logging.error(f"Ошибка при создании папки назначения {dest_dir}: {e}")
         return False
+
 
 def ensure_json_extension_for_extensionless_files(root_dir: str) -> int:
     """
@@ -57,6 +75,7 @@ def ensure_json_extension_for_extensionless_files(root_dir: str) -> int:
                 continue
     return renamed_count
 
+
 def validate_settings(settings: Dict[str, Any]) -> bool:
     """
     Проверяет корректность настроек конвертации.
@@ -80,6 +99,7 @@ def validate_settings(settings: Dict[str, Any]) -> bool:
     
     return True
 
+
 def log_conversion_process(source_dir: str, dest_dir: str, settings: Dict[str, Any]) -> None:
     """
     Логирует информацию о процессе конвертации.
@@ -90,12 +110,25 @@ def log_conversion_process(source_dir: str, dest_dir: str, settings: Dict[str, A
         settings: Настройки конвертации
     """
     logging.info("=" * 60)
-    logging.info("НАЧАЛО КОНВЕРТАЦИИ AI STUDIO В MARKDOWN")
+    logging.info("НАЧАЛО КОНВЕРТАЦИИ AI STUDIO В MARKDOWN/HTML")
     logging.info("=" * 60)
     logging.info(f"Исходная папка: {source_dir}")
     logging.info(f"Папка назначения: {dest_dir}")
-    logging.info(f"Настройки: {json.dumps(settings, indent=2, ensure_ascii=False)}")
+    def _safe(v):
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            return v
+        if isinstance(v, (list, tuple)):
+            return [_safe(x) for x in v]
+        if isinstance(v, dict):
+            return {k: _safe(vv) for k, vv in v.items() if k != 'cancel_event'}
+        return str(v)
+    try:
+        safe_settings = _safe(settings)
+        logging.info(f"Настройки: {json.dumps(safe_settings, indent=2, ensure_ascii=False)}")
+    except Exception:
+        logging.info("Настройки: <unprintable>")
     logging.info("=" * 60)
+
 
 def extract_markdown_content(data: Dict[str, Any], settings: Dict[str, Any]) -> str:
     """
@@ -202,6 +235,13 @@ def extract_markdown_content(data: Dict[str, Any], settings: Dict[str, Any]) -> 
                     txt = seg.get('text')
                     if isinstance(txt, str) and txt:
                         chunks.append(txt)
+                    # Упрощенная поддержка ссылок на вложения
+                    image_url = seg.get('imageUrl') or seg.get('image_url')
+                    if isinstance(image_url, str) and image_url:
+                        chunks.append(f"![image]({image_url})")
+                    file_url = seg.get('fileUrl') or seg.get('file_url')
+                    if isinstance(file_url, str) and file_url:
+                        chunks.append(f"[attachment]({file_url})")
                 elif isinstance(seg, str):
                     chunks.append(seg)
             return "\n".join(chunks).strip()
@@ -210,42 +250,21 @@ def extract_markdown_content(data: Dict[str, Any], settings: Dict[str, Any]) -> 
         return ''
 
     def collect_messages() -> List[Dict[str, Any]]:
+        # Используем адаптер нормализации для универсального извлечения
+        prefer = (settings.get('source_format') or 'auto').lower()
+        normalized = normalize_conversation(data, prefer=prefer)
         messages: List[Dict[str, Any]] = []
-        # 1) Явный массив messages
-        explicit = data.get('messages')
-        if isinstance(explicit, list):
-            for item in explicit:
-                if not isinstance(item, dict):
-                    continue
-                text = item.get('content') or item.get('text')
-                if isinstance(text, list):
-                    text = _join_parts(text)
-                if not text:
-                    continue
-                messages.append({
-                    'role': item.get('role'),
-                    'content': text,
-                    'timestamp': item.get('timestamp') or item.get('time')
-                })
-
-        # 2) chunkedPrompt.chunks
-        if not messages:
-            chunks = first_of(['chunkedPrompt.chunks'], [])
-            if isinstance(chunks, list):
-                for ch in chunks:
-                    if not isinstance(ch, dict):
-                        continue
-                    if settings.get('exclude_thoughts', True) and ch.get('isThought'):
-                        continue
-                    text_val = ch.get('text') or _join_parts(ch.get('parts'))
-                    if not text_val:
-                        continue
-                    messages.append({
-                        'role': ch.get('role') or 'model',
-                        'content': text_val,
-                        'timestamp': ch.get('timestamp') or ch.get('time')
-                    })
-
+        for item in normalized:
+            if not isinstance(item, dict):
+                continue
+            text = item.get('content') or ''
+            if not text:
+                continue
+            messages.append({
+                'role': item.get('role'),
+                'content': text,
+                'timestamp': item.get('timestamp')
+            })
         return messages
 
     md_lines: List[str] = []
@@ -315,9 +334,172 @@ def extract_markdown_content(data: Dict[str, Any], settings: Dict[str, Any]) -> 
     
     return "\n".join(md_lines)
 
+
+def _guess_extension_from_mime(mime_type: str) -> str:
+    ext = mimetypes.guess_extension(mime_type or '') or ''
+    if not ext:
+        mapping = {
+            'image/png': '.png',
+            'image/jpeg': '.jpg',
+            'image/jpg': '.jpg',
+            'image/webp': '.webp',
+            'image/gif': '.gif',
+            'text/plain': '.txt',
+            'application/pdf': '.pdf',
+        }
+        ext = mapping.get((mime_type or '').lower(), '')
+    return ext or ''
+
+
+def _find_inline_attachments(data: Any) -> List[Tuple[Optional[str], Optional[str], Optional[str]]]:
+    """
+    Ищет в произвольной структуре словарей/списков элементы с inlineData (data + mimeType)
+    и ссылки imageUrl/fileUrl. Возвращает список кортежей (base64_data, mimeType, remote_url).
+    """
+    found: List[Tuple[Optional[str], Optional[str], Optional[str]]] = []
+
+    def _walk(obj: Any):
+        if isinstance(obj, dict):
+            inline = obj.get('inlineData') or obj.get('inline_data')
+            if isinstance(inline, dict):
+                b64 = inline.get('data')
+                m = inline.get('mimeType') or inline.get('mime_type')
+                if isinstance(b64, str) and isinstance(m, str):
+                    found.append((b64, m, None))
+            image_url = obj.get('imageUrl') or obj.get('image_url')
+            if isinstance(image_url, str):
+                found.append((None, None, image_url))
+            file_url = obj.get('fileUrl') or obj.get('file_url')
+            if isinstance(file_url, str):
+                found.append((None, None, file_url))
+            for v in obj.values():
+                _walk(v)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(data)
+    return found
+
+
+def _render_markdown_with_template(md_text: str, settings: Dict[str, Any], context: Dict[str, Any]) -> str:
+    template_path = settings.get('template_path') or ''
+    # Тема по умолчанию
+    if not template_path and settings.get('theme') == 'default':
+        candidate = os.path.join(os.path.dirname(__file__), '..', 'examples', 'templates', 'md_default.j2')
+        template_path = os.path.abspath(candidate)
+    if template_path and os.path.exists(template_path):
+        key = os.path.dirname(template_path)
+        env = TEMPLATE_CACHE.get(key)
+        if env is None:
+            env = Environment(loader=FileSystemLoader(os.path.dirname(template_path)), autoescape=False)
+            TEMPLATE_CACHE[key] = env
+        template = env.get_template(os.path.basename(template_path))
+        return template.render({**context, 'content': md_text})
+    return md_text
+
+
+def _wrap_with_yaml_front_matter(md_text: str, front_matter: Dict[str, Any], enable: bool) -> str:
+    if not enable:
+        return md_text
+    try:
+        import yaml  # lazy import
+        yaml_text = yaml.safe_dump(front_matter, allow_unicode=True, sort_keys=False).strip()
+        return f"---\n{yaml_text}\n---\n\n" + md_text
+    except Exception:
+        return md_text
+
+
+def _build_front_matter(data: Dict[str, Any], run_settings: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
+    title = settings.get('__source_basename') or data.get('title') or 'AI Studio Конвертация'
+    fm: Dict[str, Any] = {
+        'title': title,
+        'date': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    model = (run_settings or {}).get('model') or (run_settings or {}).get('modelName')
+    if model:
+        fm['model'] = model
+    return fm
+
+
+def _render_html_from_markdown(md_text_without_yaml: str, settings: Dict[str, Any], context: Dict[str, Any]) -> str:
+    html_body = md.markdown(md_text_without_yaml, extensions=['fenced_code', 'tables'])
+    html_template_path = settings.get('html_template_path') or ''
+    if not html_template_path and settings.get('theme') == 'default':
+        candidate = os.path.join(os.path.dirname(__file__), '..', 'examples', 'templates', 'html_default.j2')
+        html_template_path = os.path.abspath(candidate)
+    if html_template_path and os.path.exists(html_template_path):
+        key = os.path.dirname(html_template_path)
+        env = TEMPLATE_CACHE.get(key)
+        if env is None:
+            env = Environment(loader=FileSystemLoader(os.path.dirname(html_template_path)), autoescape=False)
+            TEMPLATE_CACHE[key] = env
+        template = env.get_template(os.path.basename(html_template_path))
+        return template.render({**context, 'content_html': html_body, 'content_markdown': md_text_without_yaml})
+    # Fallback простой HTML
+    return f"""
+<!doctype html>
+<html lang=\"ru\">
+<head>
+<meta charset=\"utf-8\" />
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+<title>{context.get('title', 'Document')}</title>
+<style>
+body {{ font-family: -apple-system, Segoe UI, Roboto, sans-serif; line-height: 1.6; max-width: 860px; margin: 24px auto; padding: 0 16px; }}
+h1,h2,h3,h4 {{ line-height: 1.25; }}
+code, pre {{ background: #0b0f14; color: #e6e6e6; border-radius: 6px; }}
+pre {{ padding: 12px; overflow: auto; }}
+table {{ border-collapse: collapse; }}
+th, td {{ border: 1px solid #ddd; padding: 6px 10px; }}
+blockquote {{ border-left: 4px solid #ccc; margin: 0; padding: 0 12px; color: #555; }}
+hr {{ border: none; border-top: 1px solid #e0e0e0; margin: 24px 0; }}
+</style>
+</head>
+<body>
+{html_body}
+</body>
+</html>
+"""
+
+
+def _export_docx_from_markdown(md_text: str, output_path: str) -> None:
+    doc = DocxDocument()
+    for line in md_text.splitlines():
+        if line.startswith('# '):
+            doc.add_heading(line[2:].strip(), level=1)
+        elif line.startswith('## '):
+            doc.add_heading(line[3:].strip(), level=2)
+        elif line.startswith('### '):
+            doc.add_heading(line[4:].strip(), level=3)
+        else:
+            doc.add_paragraph(line)
+    doc.save(output_path)
+
+def _export_pdf_simple(text: str, output_path: str) -> None:
+    c = canvas.Canvas(output_path, pagesize=A4)
+    width, height = A4
+    x, y = 40, height - 40
+    max_width = width - 80
+    for raw_line in text.splitlines():
+        line = raw_line.replace('\t', '    ')
+        while line:
+            # простая обрезка строки по ширине
+            cut = line
+            while c.stringWidth(cut) > max_width and len(cut) > 1:
+                cut = cut[:-1]
+            c.drawString(x, y, cut)
+            line = line[len(cut):]
+            y -= 16
+            if y < 40:
+                c.showPage()
+                y = height - 40
+    c.showPage()
+    c.save()
+
+
 def convert_single_file(json_file_path: str, dest_dir: str, settings: Dict[str, Any]) -> bool:
     """
-    Конвертирует один JSON файл в формат Markdown.
+    Конвертирует один JSON файл в формат Markdown/HTML.
     
     Args:
         json_file_path: Путь к исходному JSON файлу
@@ -339,44 +521,139 @@ def convert_single_file(json_file_path: str, dest_dir: str, settings: Dict[str, 
         settings_with_fallback['__source_basename'] = base_name
 
         # Извлекаем данные согласно настройкам
-        md_content = extract_markdown_content(data, settings_with_fallback)
-        
-        if not md_content:
-            logging.warning(f"Не удалось извлечь содержимое из файла {json_file_path}")
-            return False
-        
-        # Определяем имя выходного файла
-        # json_filename и base_name уже рассчитаны выше
+        md_content_core = extract_markdown_content(data, settings_with_fallback)
+
+        # Front matter
+        run_settings = data.get('run_settings') or data.get('runSettings') or {}
+        front_matter = _build_front_matter(data, run_settings, settings_with_fallback)
+        md_with_front_matter = _wrap_with_yaml_front_matter(
+            md_content_core, front_matter, settings_with_fallback.get('enable_yaml_front_matter', False)
+        )
+
+        # Рендер Markdown через шаблон (если задан)
+        context = {
+            'title': front_matter.get('title'),
+            'data': data,
+            'settings': settings_with_fallback,
+            'run_settings': run_settings,
+            'now': datetime.now().isoformat(timespec='seconds')
+        }
+        md_final = _render_markdown_with_template(md_with_front_matter, settings_with_fallback, context)
+
+        # Подготовка путей
         md_filename = f"{base_name}.md"
-        
-        # Определяем папку назначения
+        html_filename = f"{base_name}.html"
         final_dest_dir = dest_dir
-        
+
         # Создаем подпапки если включено
         if settings.get("create_subfolders", True):
-            # Получаем относительный путь от исходной папки
             source_dir = settings.get("source_dir", "")
             if source_dir:
                 rel_path = os.path.relpath(os.path.dirname(json_file_path), source_dir)
                 if rel_path != ".":
                     final_dest_dir = os.path.join(dest_dir, rel_path)
-                    # Создаем подпапку если она не существует
                     os.makedirs(final_dest_dir, exist_ok=True)
-        
-        # Полный путь к выходному файлу
-        output_path = os.path.join(final_dest_dir, md_filename)
-        
-        # Проверяем существование файла
-        if os.path.exists(output_path) and not settings.get("overwrite_existing", False):
-            # Пропуск существующего файла не считается ошибкой
-            logging.warning(f"Файл {output_path} уже существует. Пропускаем без ошибки.")
+
+        # Вложения (inline/base64 и ссылки) -> сохраняем файлы и добавим раздел в конец MD
+        assets_dir = os.path.join(final_dest_dir, f"{base_name}_assets")
+        attachments = _find_inline_attachments(data)
+        saved_attachments: List[str] = []
+        if attachments:
+            os.makedirs(assets_dir, exist_ok=True)
+            counter = 1
+            for b64_data, mime_type, remote_url in attachments:
+                if remote_url:
+                    saved_attachments.append(remote_url)
+                    continue
+                if b64_data and mime_type:
+                    try:
+                        raw = base64.b64decode(b64_data)
+                        ext = _guess_extension_from_mime(mime_type) or f"_{counter}"
+                        file_name = f"att_{counter}{ext}"
+                        out_path = os.path.join(assets_dir, file_name)
+                        if not settings.get('dry_run', False):
+                            with open(out_path, 'wb') as wf:
+                                wf.write(raw)
+                        saved_attachments.append(os.path.join(f"{base_name}_assets", file_name))
+                        counter += 1
+                    except Exception as e:
+                        logging.warning(f"Не удалось сохранить вложение: {e}")
+
+        if saved_attachments:
+            md_final += "\n\n## 📎 Вложения\n"
+            for link in saved_attachments:
+                if link.startswith('http'):
+                    md_final += f"- [attachment]({link})\n"
+                else:
+                    md_final += f"- ![attachment]({link})\n"
+
+        # Определяем форматы экспорта
+        export_format = (settings.get('export_format') or 'md').lower()
+        write_md = export_format in ('md', 'both')
+        write_html = export_format in ('html', 'both')
+        write_pdf = bool(settings.get('export_pdf'))
+        write_docx = bool(settings.get('export_docx'))
+
+        # Полные пути
+        md_output_path = os.path.join(final_dest_dir, md_filename)
+        html_output_path = os.path.join(final_dest_dir, html_filename)
+        pdf_output_path = os.path.join(final_dest_dir, f"{base_name}.pdf")
+        docx_output_path = os.path.join(final_dest_dir, f"{base_name}.docx")
+
+        # DRY-RUN
+        if settings.get('dry_run', False):
+            logging.info(f"[DRY-RUN] {json_file_path} -> {md_output_path if write_md else ''} {html_output_path if write_html else ''}")
             return True
-        
-        # Записываем результат
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(md_content)
-        
-        logging.info(f"Успешно конвертирован: {json_file_path} -> {output_path}")
+
+        # Проверяем существование файла
+        if write_md and os.path.exists(md_output_path) and not settings.get("overwrite_existing", False):
+            logging.warning(f"Файл {md_output_path} уже существует. Пропускаем без ошибки.")
+            write_md = False
+        if write_html and os.path.exists(html_output_path) and not settings.get("overwrite_existing", False):
+            logging.warning(f"Файл {html_output_path} уже существует. Пропускаем без ошибки.")
+            write_html = False
+        if write_pdf and os.path.exists(pdf_output_path) and not settings.get("overwrite_existing", False):
+            logging.warning(f"Файл {pdf_output_path} уже существует. Пропускаем без ошибки.")
+            write_pdf = False
+        if write_docx and os.path.exists(docx_output_path) and not settings.get("overwrite_existing", False):
+            logging.warning(f"Файл {docx_output_path} уже существует. Пропускаем без ошибки.")
+            write_docx = False
+
+        # Записываем MD
+        if write_md:
+            with open(md_output_path, 'w', encoding='utf-8') as f:
+                f.write(md_final)
+
+        # Готовим HTML из Markdown без YAML префикса (если он был)
+        if write_html:
+            # Уберем YAML префикс, если есть
+            if md_final.startswith('---\n'):
+                try:
+                    end_idx = md_final.index('\n---\n', 4)
+                    md_for_html = md_final[end_idx + 5 :]
+                except ValueError:
+                    md_for_html = md_final
+            else:
+                md_for_html = md_final
+
+            html_text = _render_html_from_markdown(md_for_html, settings_with_fallback, context)
+            with open(html_output_path, 'w', encoding='utf-8') as f:
+                f.write(html_text)
+
+        # PDF и DOCX из Markdown (грубая конвертация текста)
+        text_for_other = md_final
+        if write_pdf:
+            try:
+                _export_pdf_simple(text_for_other, pdf_output_path)
+            except Exception as e:
+                logging.warning(f"PDF экспорт не удался: {e}")
+        if write_docx:
+            try:
+                _export_docx_from_markdown(text_for_other, docx_output_path)
+            except Exception as e:
+                logging.warning(f"DOCX экспорт не удался: {e}")
+
+        logging.info(f"Успешно конвертирован: {json_file_path} -> {final_dest_dir}")
         return True
         
     except json.JSONDecodeError as e:
@@ -386,15 +663,58 @@ def convert_single_file(json_file_path: str, dest_dir: str, settings: Dict[str, 
         logging.error(f"Ошибка при конвертации файла {json_file_path}: {e}")
         return False
 
+
+def render_markdown_preview(json_file_path: str, settings: Dict[str, Any]) -> str:
+    """
+    Генерирует Markdown (с учетом шаблонов и YAML FM) для предпросмотра, без записи на диск.
+    """
+    with open(json_file_path, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+
+    json_filename = os.path.basename(json_file_path)
+    base_name = os.path.splitext(json_filename)[0]
+    settings_with_fallback = dict(settings)
+    settings_with_fallback['__source_basename'] = base_name
+
+    md_content_core = extract_markdown_content(data, settings_with_fallback)
+    run_settings = data.get('run_settings') or data.get('runSettings') or {}
+    front_matter = _build_front_matter(data, run_settings, settings_with_fallback)
+    md_with_front_matter = _wrap_with_yaml_front_matter(
+        md_content_core, front_matter, settings_with_fallback.get('enable_yaml_front_matter', False)
+    )
+    context = {
+        'title': front_matter.get('title'),
+        'data': data,
+        'settings': settings_with_fallback,
+        'run_settings': run_settings,
+        'now': datetime.now().isoformat(timespec='seconds')
+    }
+    md_final = _render_markdown_with_template(md_with_front_matter, settings_with_fallback, context)
+
+    # Добавим список вложений (без сохранения файлов)
+    attachments = _find_inline_attachments(data)
+    if attachments:
+        md_final += "\n\n## 📎 Вложения\n"
+        counter = 1
+        for b64_data, mime_type, remote_url in attachments:
+            if remote_url:
+                md_final += f"- [attachment]({remote_url})\n"
+            else:
+                label = f"inline_{counter}.{_guess_extension_from_mime(mime_type).lstrip('.')}" if mime_type else f"inline_{counter}"
+                md_final += f"- {label}\n"
+                counter += 1
+    return md_final
+
+
 def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], progress_queue) -> None:
     """
-    Основная функция конвертации файлов AI Studio в Markdown.
+    Основная функция конвертации файлов AI Studio в Markdown/HTML.
     
     Args:
         source_dir: Папка с исходными JSON файлами
         dest_dir: Папка для сохранения результатов
         settings: Настройки конвертации
-        progress_queue: Очередь для отправки прогресса в GUI
+        progress_queue: Очередь для отправки прогресса в GUI/CLI
     """
     try:
         # Логируем начало процесса
@@ -416,11 +736,12 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
             })
             return
         
-        # Сначала добавим .json ко всем файлам без расширения
+        # По флагу: добавим .json ко всем файлам без расширения
         try:
-            renamed = ensure_json_extension_for_extensionless_files(source_dir)
-            if renamed:
-                logging.info(f"Переименовано файлов без расширения: {renamed}")
+            if settings.get('rename_extensionless', False):
+                renamed = ensure_json_extension_for_extensionless_files(source_dir)
+                if renamed:
+                    logging.info(f"Переименовано файлов без расширения: {renamed}")
         except Exception:
             pass
 
@@ -431,6 +752,34 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
                 if file.lower().endswith('.json'):
                     json_files.append(os.path.join(root, file))
         
+        # Фильтрация include/exclude по glob
+        include_globs: List[str] = []
+        exclude_globs: List[str] = []
+        inc = settings.get('include_globs') or settings.get('include_glob')
+        exc = settings.get('exclude_globs') or settings.get('exclude_glob')
+        if isinstance(inc, str) and inc.strip():
+            include_globs = [p.strip() for p in inc.split(';') if p.strip()]
+        elif isinstance(inc, list):
+            include_globs = [str(p) for p in inc]
+        if isinstance(exc, str) and exc.strip():
+            exclude_globs = [p.strip() for p in exc.split(';') if p.strip()]
+        elif isinstance(exc, list):
+            exclude_globs = [str(p) for p in exc]
+
+        if include_globs or exclude_globs:
+            filtered: List[str] = []
+            for p in json_files:
+                rel = os.path.relpath(p, source_dir)
+                keep = True
+                if include_globs:
+                    keep = any(fnmatch.fnmatch(rel, pat) for pat in include_globs)
+                if keep and exclude_globs:
+                    if any(fnmatch.fnmatch(rel, pat) for pat in exclude_globs):
+                        keep = False
+                if keep:
+                    filtered.append(p)
+            json_files = filtered
+
         if not json_files:
             progress_queue.put({
                 "type": "info",
@@ -444,25 +793,74 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
             "message": f"Найдено {len(json_files)} JSON файлов для конвертации"
         })
         
-        # Конвертируем файлы
+        # Конвертируем файлы (возможна параллельная обработка)
         successful_conversions = 0
         failed_conversions = 0
-        
-        for i, json_file in enumerate(json_files):
-            # Отправляем прогресс
-            progress = int((i / len(json_files)) * 100)
-            progress_queue.put({
-                "type": "progress",
-                "value": progress,
-                "message": f"Конвертация файла {i+1} из {len(json_files)}: {os.path.basename(json_file)}"
-            })
-            
-            # Конвертируем файл
-            if convert_single_file(json_file, dest_dir, settings):
-                successful_conversions += 1
-            else:
-                failed_conversions += 1
-        
+        total = len(json_files)
+        completed = 0
+        workers = max(1, int(settings.get('workers', 1)))
+
+        # Отмена и ETA
+        cancel_event: Optional[threading.Event] = settings.get('cancel_event') if isinstance(settings.get('cancel_event'), threading.Event) else None
+        start_ts = time.time()
+        last_progress_emit = 0.0
+
+        def _convert_wrapper(path: str) -> Tuple[str, bool]:
+            ok = convert_single_file(path, dest_dir, settings)
+            return path, ok
+
+        if workers == 1:
+            for i, json_file in enumerate(json_files):
+                if cancel_event and cancel_event.is_set():
+                    break
+                progress_queue.put({
+                    "type": "progress",
+                    "value": int((i / total) * 100),
+                    "message": f"Конвертация файла {i+1} из {total}: {os.path.basename(json_file)}"
+                })
+                if convert_single_file(json_file, dest_dir, settings):
+                    successful_conversions += 1
+                else:
+                    failed_conversions += 1
+                completed += 1
+                # ETA
+                dt = time.time() - start_ts
+                if completed > 0 and dt > 0 and (time.time() - last_progress_emit) > 0.5:
+                    avg = dt / completed
+                    remain = max(0, int((total - completed) * avg))
+                    progress_queue.put({
+                        "type": "info",
+                        "message": f"ETA ~ {remain}s"
+                    })
+                    last_progress_emit = time.time()
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                future_to_path = {executor.submit(_convert_wrapper, p): p for p in json_files}
+                for fut in as_completed(future_to_path):
+                    if cancel_event and cancel_event.is_set():
+                        break
+                    path, ok = fut.result()
+                    completed += 1
+                    if ok:
+                        successful_conversions += 1
+                    else:
+                        failed_conversions += 1
+                    progress_queue.put({
+                        "type": "progress",
+                        "value": int((completed / total) * 100),
+                        "message": f"Готово {completed}/{total}: {os.path.basename(path)}"
+                    })
+                    # ETA
+                    dt = time.time() - start_ts
+                    if completed > 0 and dt > 0 and (time.time() - last_progress_emit) > 0.5:
+                        avg = dt / completed
+                        remain = max(0, int((total - completed) * avg))
+                        progress_queue.put({
+                            "type": "info",
+                            "message": f"ETA ~ {remain}s"
+                        })
+                        last_progress_emit = time.time()
+ 
         # Отправляем финальный прогресс
         progress_queue.put({
             "type": "progress",
@@ -473,6 +871,41 @@ def convert_files(source_dir: str, dest_dir: str, settings: Dict[str, Any], prog
         # Логируем результаты
         logging.info(f"Конвертация завершена. Успешно: {successful_conversions}, Ошибок: {failed_conversions}")
         
+        # Сгенерировать индекс по папке
+        try:
+            index_md = os.path.join(dest_dir, 'index.md')
+            lines = ["# Index", ""]
+            for root, _, files in os.walk(dest_dir):
+                rel_root = os.path.relpath(root, dest_dir)
+                for f in sorted(files):
+                    if f.endswith('.md') and f != 'index.md':
+                        rel_path = os.path.join(rel_root, f)
+                        lines.append(f"- [{f}]({rel_path})")
+            with open(index_md, 'w', encoding='utf-8') as wf:
+                wf.write("\n".join(lines))
+            progress_queue.put({"type": "info", "message": f"Индекс создан: {index_md}"})
+        except Exception as e:
+            progress_queue.put({"type": "warning", "message": f"Не удалось создать индекс: {e}"})
+
+        # Упаковка в ZIP, если включено
+        if settings.get('zip_output'):
+            zip_name = settings.get('zip_name') or f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            zip_path = os.path.join(dest_dir, f"{zip_name}.zip")
+            created_after = start_ts - 1  # небольшая фора
+            exts = {'.md', '.html'}
+            try:
+                with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                    for root, _, files in os.walk(dest_dir):
+                        for f in files:
+                            if os.path.splitext(f)[1].lower() in exts or f.endswith('.pdf') or f.endswith('.docx'):
+                                full = os.path.join(root, f)
+                                if os.path.getmtime(full) >= created_after:
+                                    arcname = os.path.relpath(full, dest_dir)
+                                    zf.write(full, arcname)
+                progress_queue.put({"type": "info", "message": f"ZIP создан: {zip_path}"})
+            except Exception as e:
+                progress_queue.put({"type": "warning", "message": f"Не удалось создать ZIP: {e}"})
+
         # Отправляем финальное сообщение
         if failed_conversions == 0:
             progress_queue.put({

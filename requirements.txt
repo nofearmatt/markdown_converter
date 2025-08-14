@@ -1,2 +1,11 @@
 customtkinter==5.2.0
-pyinstaller==6.3.0
+pyinstaller==6.15.0
+platformdirs==4.2.2
+Jinja2==3.1.4
+PyYAML==6.0.2
+watchdog==4.0.0
+markdown==3.6
+pytest==8.3.2
+python-docx==1.1.2
+reportlab==4.2.2
+tkinterweb==3.23.8

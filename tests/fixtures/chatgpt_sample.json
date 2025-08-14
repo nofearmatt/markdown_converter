@@ -1,0 +1,34 @@
+{
+  "title": "Sample ChatGPT",
+  "mapping": {
+    "root": {
+      "id": "root",
+      "message": null,
+      "parent": null,
+      "children": ["u1"]
+    },
+    "u1": {
+      "id": "u1",
+      "parent": "root",
+      "children": ["a1"],
+      "message": {
+        "id": "m-u1",
+        "author": {"role": "user"},
+        "create_time": 1000,
+        "content": {"parts": ["Hello from user"]}
+      }
+    },
+    "a1": {
+      "id": "a1",
+      "parent": "u1",
+      "children": [],
+      "message": {
+        "id": "m-a1",
+        "author": {"role": "assistant"},
+        "create_time": 1001,
+        "content": {"parts": ["Hi, I am ChatGPT"]}
+      }
+    }
+  },
+  "current_node": "a1"
+}

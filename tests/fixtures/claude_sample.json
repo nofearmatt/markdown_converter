@@ -1,0 +1,6 @@
+{
+  "messages": [
+    {"role": "user", "content": [{"text": "Hi Claude"}], "timestamp": "2025-01-01T00:00:00Z"},
+    {"role": "assistant", "content": [{"text": "Hello human"}], "timestamp": "2025-01-01T00:00:02Z"}
+  ]
+}
